@@ -17,14 +17,14 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, Dataset, random_split
+from torch.utils.data import DataLoader, Dataset
 
 # ==========================================
 # CONSTANTES
 # ==========================================
 K_COULOMB = 8.98755e9   # N·m²/C²
 RUIDO_RELATIVO = 0.5    # Desviación típica del ruido, relativa a |E|
-RUTA_MODELO = "modelo_cargas.pt"
+RUTA_MODELO = "modelo_cargas.pt"  # nuevo nombre: no reutiliza el modelo antiguo
 
 
 # ==========================================
@@ -193,6 +193,26 @@ class CargasDataset(Dataset):
                 torch.tensor(target, dtype=torch.float32))
 
 
+class CargasAlVuelo(Dataset):
+    """
+    Genera un set nuevo en cada acceso: datos ilimitados sin ocupar RAM
+    y sin que el modelo pueda memorizarlos. `n_muestras` = muestras por época.
+    """
+
+    def __init__(self, n_muestras, n_cargas, stats, x_lim=(-1, 1), y_lim=(-1, 1),
+                 q_max=2e-9, res=200):
+        self.n, self.n_cargas, self.stats = n_muestras, n_cargas, stats
+        self.x_lim, self.y_lim, self.q_max, self.res = x_lim, y_lim, q_max, res
+
+    def __len__(self):
+        return self.n
+
+    def __getitem__(self, idx):
+        cargas = generar_cargas_aleatorias(self.n_cargas, self.x_lim, self.y_lim, self.q_max)
+        malla = calcular_potencial_y_campo(cargas, self.x_lim, self.y_lim, self.res)
+        return CargasDataset([{"cargas": cargas, "datos_malla": malla}], self.stats)[0]
+
+
 # ==========================================
 # 4. MODELO
 # ==========================================
@@ -241,6 +261,11 @@ def _dispositivo():
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def _semilla_worker(_):
+    """Cada proceso del DataLoader genera datos distintos."""
+    np.random.seed(torch.initial_seed() % 2**32)
+
+
 def _epoca(modelo, loader, criterion, device, optimizer=None):
     """Una pasada por `loader`. Si hay optimizer entrena; si no, evalúa. Devuelve la pérdida media."""
     entrenando = optimizer is not None
@@ -278,31 +303,42 @@ def graficar_curvas(hist_train, hist_test):
     plt.show()
 
 
-def entrenar_modelo_cargas(num_sets=200, n_cargas=3, batch_size=16, epochs=100,
-                           learning_rate=1e-3, plot_curves=True, semilla=None):
+def entrenar_modelo_cargas(num_sets=3000, n_cargas=3, batch_size=64, epochs=100,
+                           learning_rate=1e-3, plot_curves=True, semilla=None,
+                           n_test=1000, num_workers=4, weight_decay=1e-4):
     """
-    Genera datos, entrena la CNN y devuelve:
-        (modelo, hist_train_loss, hist_test_loss, test_dataset, stats)
+    Entrena la CNN con datos generados al vuelo.
+
+    num_sets    : muestras de entrenamiento NUEVAS por época (no se guardan en RAM).
+    n_test      : tamaño del set de test fijo (se genera una vez).
+    num_workers : procesos que generan datos en paralelo (0 = sin paralelizar).
+
+    Devuelve (modelo, hist_train_loss, hist_test_loss, test_dataset, stats).
     """
     device = _dispositivo()
+    if semilla is not None:
+        np.random.seed(semilla)
+        torch.manual_seed(semilla)
 
-    print(f"Generando dataset con {num_sets} ejemplos...")
-    datos = generar_y_graficar_sets_aleatorios(num_sets, n_cargas, graficar=False)
-    stats = calcular_estadisticas_globales(datos)
-    dataset = CargasDataset(datos, stats)
+    # Test fijo: sirve para comparar épocas y para fijar la normalización
+    print(f"Generando set de test fijo ({n_test} ejemplos)...")
+    datos_test = generar_y_graficar_sets_aleatorios(n_test, n_cargas, graficar=False)
+    stats = calcular_estadisticas_globales(datos_test)
+    test_ds = CargasDataset(datos_test, stats)
 
-    train_size = int(0.8 * len(dataset))
-    test_size = len(dataset) - train_size
-    generador = torch.Generator().manual_seed(semilla) if semilla is not None else None
-    train_ds, test_ds = random_split(dataset, [train_size, test_size], generator=generador)
-
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
+    # Train: datos nuevos en cada época
+    train_ds = CargasAlVuelo(num_sets, n_cargas, stats)
+    train_loader = DataLoader(
+        train_ds, batch_size=batch_size, num_workers=num_workers,
+        worker_init_fn=_semilla_worker if num_workers > 0 else None,
+        persistent_workers=num_workers > 0, pin_memory=device.type == "cuda",
+    )
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
-    print(f"Datos preparados: {train_size} para Train, {test_size} para Test. Dispositivo: {device}")
+    print(f"Train al vuelo: {num_sets}/época | Test fijo: {n_test} | Dispositivo: {device}")
 
     modelo = CNNExtractorCargas(max_cargas=n_cargas, input_channels=2).to(device)
     criterion = nn.MSELoss()
-    optimizer = optim.Adam(modelo.parameters(), lr=learning_rate)
+    optimizer = optim.Adam(modelo.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
     hist_train, hist_test = [], []
     print("Iniciando entrenamiento...")
@@ -396,9 +432,15 @@ def cargar_o_entrenar(ruta=RUTA_MODELO, n_cargas=3, **kwargs_entrenamiento):
 # EJEMPLO DE USO
 # ==========================================
 if __name__ == "__main__":
-    N_CARGAS = 3
+    N_CARGAS = 4
     modelo, stats = cargar_o_entrenar(
-        n_cargas=N_CARGAS, num_sets=1000, batch_size=16, epochs=30, learning_rate=1e-3,
+        n_cargas=N_CARGAS,
+        num_sets=3000,     # muestras NUEVAS por época (no se guardan en RAM)
+        epochs=60,          
+        batch_size=64,
+        learning_rate=1e-3,
+        n_test=1000,        # test fijo
+        num_workers=4,      # núcleos de CPU generando datos (bájalo si va mal)
     )
-    datos_nuevos = generar_y_graficar_sets_aleatorios(num_sets=10, n_cargas=N_CARGAS, graficar=False)
+    datos_nuevos = generar_y_graficar_sets_aleatorios(num_sets=18, n_cargas=N_CARGAS, graficar=False)
     comparar_predicciones(modelo, CargasDataset(datos_nuevos, stats), stats)
