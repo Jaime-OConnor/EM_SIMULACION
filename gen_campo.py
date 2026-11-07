@@ -5,7 +5,6 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader, random_split
 
-start=1
 
 def mapa_potencial_y_campo(cargas, x_lim=(-1, 1), y_lim=(-1, 1), res=200, titulo="", graficar=True):
     """
@@ -477,17 +476,71 @@ def entrenar_modelo_cargas(num_sets=200, n_cargas=3, batch_size=16, epochs=100, 
         plt.tight_layout()
         plt.show()
         
-    return modelo, hist_train_loss, hist_test_loss
+        # al final de entrenar_modelo_cargas
+    return modelo, hist_train_loss, hist_test_loss, test_dataset, stats_dinamicas
+import math
 
-# ==========================================
+def comparar_predicciones(modelo, test_dataset, stats, n_ejemplos=30, por_pagina=9):
+    modelo.eval()
+    d, q_max = stats["max_dist"], stats["max_q"]
+    n_total = min(n_ejemplos, len(test_dataset))
+    n_paginas = math.ceil(n_total / por_pagina)
+
+    for pag in range(n_paginas):
+        ini = pag * por_pagina
+        fin = min(ini + por_pagina, n_total)
+        n = fin - ini
+
+        cols = min(4, math.ceil(math.sqrt(n)))
+        filas = math.ceil(n / cols)
+        fig, axes = plt.subplots(filas, cols, figsize=(4 * cols, 4 * filas), squeeze=False)
+        axes = axes.ravel()
+
+        for ax, idx in zip(axes, range(ini, fin)):
+            X_t, Y_t = test_dataset[idx]
+            with torch.no_grad():
+                Y_p = modelo(X_t.unsqueeze(0))[0]
+
+            real = Y_t.numpy() * [q_max, d, d]
+            pred = Y_p.numpy() * [q_max, d, d]
+
+            for r, p in zip(real, pred):
+                ax.plot([r[1], p[1]], [r[2], p[2]], '--', color='gray', lw=1, zorder=1)
+            ax.scatter(real[:, 1], real[:, 2], c=np.sign(real[:, 0]), cmap='bwr', vmin=-1, vmax=1,
+                       s=90, marker='o', edgecolors='k', zorder=2, label='Real')
+            ax.scatter(pred[:, 1], pred[:, 2], c=np.sign(pred[:, 0]), cmap='bwr', vmin=-1, vmax=1,
+                       s=90, marker='x', linewidths=2, zorder=3, label='Predicha')
+
+            ax.set_xlim(-d, d); ax.set_ylim(-d, d); ax.set_aspect('equal')
+            ax.set_title(f"Test #{idx}", fontsize=10)
+            ax.grid(alpha=0.3, ls='--')
+
+        for ax in axes[n:]:
+            ax.axis('off')
+
+        handles, labels = axes[0].get_legend_handles_labels()
+        fig.legend(handles, labels, loc='upper center', ncol=2, frameon=False)
+        fig.suptitle(f"Real (○) vs Predicha (✕) | rojo: +, azul: − | Página {pag + 1}/{n_paginas}", y=1.0)
+        plt.tight_layout(rect=(0, 0, 1, 0.94))
+        plt.show()
+#==========================
 # EJEMPLO DE USO
 # ==========================================
+RUTA = "modelo_cargas.pt"
+start=1
 if start == 1:
-    # Ahora puedes ejecutar el entrenamiento simplemente llamando a la función
-    modelo_entrenado, train_loss, test_loss = entrenar_modelo_cargas(
-        num_sets=500, 
-        n_cargas=3, 
-        batch_size=16, 
-        epochs=30, 
-        learning_rate=0.01
-    )
+    try:
+        ckpt = torch.load(RUTA, weights_only=False)
+        modelo = CNNExtractorCargas(max_cargas=3, input_channels=2)
+        modelo.load_state_dict(ckpt["pesos"])
+        stats = ckpt["stats"]
+        print("Modelo cargado.")
+    except FileNotFoundError:
+        modelo, _, _, _, stats = entrenar_modelo_cargas(
+            num_sets=500, n_cargas=3, batch_size=16, epochs=100, learning_rate=0.01
+        )
+        torch.save({"pesos": modelo.state_dict(), "stats": stats}, RUTA)
+        print("Modelo entrenado y guardado.")
+
+    datos = generar_y_graficar_sets_aleatorios(num_sets=10, n_cargas=3, graficar=False)
+    comparar_predicciones(modelo, CargasDataset(datos, stats), stats)
