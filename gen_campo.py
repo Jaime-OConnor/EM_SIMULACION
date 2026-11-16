@@ -637,7 +637,7 @@ def cargar_o_entrenar(ruta=RUTA_MODELO, **kwargs_entrenamiento):
 # EJEMPLO DE USO
 # ==========================================
 if __name__ == "__main__":
-    N_CARGAS = (5, 300)   # cada set tiene entre 1 y 6 cargas; la red NO sabe cuántas
+    N_CARGAS = (5, 10)   # cada set tiene entre 1 y 6 cargas; la red NO sabe cuántas
 
     modelo, stats = cargar_o_entrenar(
         n_cargas=N_CARGAS,
