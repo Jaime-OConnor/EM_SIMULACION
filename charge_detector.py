@@ -642,11 +642,11 @@ if __name__ == "__main__":
     model, stats = load_or_train(
         n_charges=N_CHARGES,
         num_sets=800,       # NEW samples per epoch (not stored in RAM)
-        epochs=100,
+        epochs=20,
         batch_size=32,      # the U-Net uses more GPU memory than the previous CNN
         learning_rate=1e-3,
         n_test=1000,        # fixed test set
-        num_workers=4,      # CPU cores generating data (lower it if things go wrong)
+        num_workers=8,      # CPU cores generating data (lower it if things go wrong)
         min_sep=0,          # minimum separation between charges (m)
     )
 
